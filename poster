@@ -1,0 +1,137 @@
+#!/usr/bin/env python3.11
+
+import sys
+import csv
+import os
+from datetime import datetime, timedelta
+import openai
+import asyncio
+from openai import AsyncOpenAI
+from wordpress_xmlrpc import Client, WordPressPost
+from wordpress_xmlrpc.methods.posts import NewPost
+
+# Set OpenAI API Key
+api_key = "KEYHERE"
+
+# Words and phrases to exclude
+excluded_phrases = [
+    "Firstly", "Moreover", "Furthermore", "However", "Therefore", "Additionally",
+    "Specifically", "Generally", "Consequently", "Importantly", "Similarly",
+    "Nonetheless", "As a result", "Indeed", "Thus", "Alternatively", "Notably",
+    "As well as", "Despite", "Essentially", "While", "Unless", "Also", "Even though",
+    "Because", "In contrast", "Although", "In order to", "Due to", "Even if",
+    "Given that", "Arguably", "To consider", "Ensure", "Vibrant", "Bustling",
+    "Essential", "Vital", "Out of the box", "Underscores", "Landscape", "Tapestry",
+    "Soul", "Crucible", "It depends on", "That being said", "You may want to",
+    "It's important to note", "This is not an exhaustive list", "You could consider",
+    "In summary", "On the other hand", "As previously mentioned", "It's worth noting that",
+    "In conclusion", "To summarize", "Ultimately", "To put it simply", "Pesky",
+    "Promptly", "Dive into", "In today's digital era", "Importantly", "Reverberate",
+    "Enhance", "Emphasise", "Enable", "Delve", "Hustle and bustle", "Revolutionize",
+    "Folks", "Foster", "Sure", "Labyrinthine", "Moist", "Remnant", "As a professional",
+    "Subsequently", "Nestled", "Game changer", "Symphony", "Labyrinth", "Gossamer",
+    "Enigma", "Whispering", "Sights unseen", "Sounds unheard", "A testament to...",
+    "Dance", "Metamorphosis", "Indelible", "Cyberspace", "Comprehensive", "Unveiling", "Unraveling", "Experiencing", "Experience", "Vibe", "Welcome to", "Inside look", "Insiders guide", "Guide to", "Exploring", "Discovering"
+]
+
+async def generate_post_title_and_content(client, topic):
+    print(f"Generating title and content for topic: '{topic}'")
+
+    # Generate the title
+    title_prompt = f"Create a blog post title about {topic} that directly names the subject without implying a process, action, or journey. Give the title only, with no formatting, labels, colon, or quotation marks. Absolutely do no wrap the title in quotation marks. The title should be brief. Avoid using the following words or phrases: {', '.join(excluded_phrases)}"
+
+    title_response = await client.chat.completions.create(
+        model="gpt-4",
+        messages=[
+            {"role": "system", "content": "You are a professional content writer."},
+            {"role": "user", "content": title_prompt}
+        ]
+    )
+    title = title_response.choices[0].message.content.strip()
+    print(f"Generated title: '{title}'")
+
+    # Generate the introduction
+    intro_prompt = f"Write an introduction for a blog post titled '{title}'. Make it engaging and informative. Use HTML formatting for subheadings, bold text, or lists. Avoid using the following words or phrases: {', '.join(excluded_phrases)}"
+    intro_response = await client.chat.completions.create(
+        model="gpt-4",
+        messages=[
+            {"role": "system", "content": "You are a professional content writer."},
+            {"role": "user", "content": intro_prompt}
+        ]
+    )
+    introduction = intro_response.choices[0].message.content.strip()
+
+    # Generate additional sections
+    sections = []
+    section_prompts = [
+        f"Write a detailed section about the history or background of {topic}. Include relevant examples and make it informative. Use HTML formatting for subheadings, bold text, or lists. Avoid using the following words or phrases: {', '.join(excluded_phrases)}",
+        f"Write a section explaining the benefits or importance of {topic}. Provide actionable insights. Use HTML formatting for subheadings, bold text, or lists. Avoid using the following words or phrases: {', '.join(excluded_phrases)}",
+        f"Create a conclusion for the blog post about {topic}. Summarize key points and suggest next steps. Do not create any links to other websites or pages. Use HTML formatting for subheadings, bold text, or lists. Avoid using the following words or phrases: {', '.join(excluded_phrases)}"
+    ]
+
+    for section_prompt in section_prompts:
+        section_response = await client.chat.completions.create(
+            model="gpt-4",
+            messages=[
+                {"role": "system", "content": "You are a professional content writer."},
+                {"role": "user", "content": section_prompt}
+            ]
+        )
+        sections.append(section_response.choices[0].message.content.strip())
+
+    # Combine the introduction and sections into one content string without additional labels
+    content = f"{introduction}\n\n" + "\n\n".join(sections)
+
+    print(f"Generated content for '{title}'")
+    return title, content
+
+def create_wp_post(client, title, content, publish_date):
+    post = WordPressPost()
+    post.title = title
+    post.content = content
+    post.post_status = 'publish' if publish_date == 'now' else 'future'
+    if publish_date != 'now':
+        post.date = publish_date
+
+    post.terms_names = {
+        'post_tag': ['poster'],
+        'category': ['Uncategorized'],
+    }
+
+    post_id = client.call(NewPost(post))
+    print(f"Post '{title}' created with ID: {post_id}")
+
+async def main():
+    if len(sys.argv) != 5:
+        print("Usage: ./poster <site_URL> <username> <password> <CSV_file>")
+        sys.exit(1)
+
+    site_url = sys.argv[1]
+    username = sys.argv[2]
+    password = sys.argv[3]
+    csv_file = sys.argv[4]
+
+    client = Client(f"{site_url}/xmlrpc.php", username, password)
+    openai_client = AsyncOpenAI(api_key=api_key)
+
+    with open(csv_file, newline='') as csvfile:
+        reader = csv.reader(csvfile)
+        topics = [row[0] for row in reader]
+
+    print(f"Found {len(topics)} topics in CSV file.")
+
+    for i, topic in enumerate(topics):
+        title, content = await generate_post_title_and_content(openai_client, topic)
+
+        if i == 0:
+            print(f"Publishing first post immediately.")
+            create_wp_post(client, title, content, 'now')
+        else:
+            publish_date = datetime.now() + timedelta(days=i * 2)
+            print(f"Scheduling post '{title}' to be published on {publish_date}.")
+            create_wp_post(client, title, content, publish_date)
+
+    print("All posts have been processed.")
+
+if __name__ == "__main__":
+    asyncio.run(main())
